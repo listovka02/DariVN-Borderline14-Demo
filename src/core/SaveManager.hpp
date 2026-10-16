@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 #include "script/ExpressionEvaluator.hpp"
+#include "script/ScriptCommand.hpp"
 #include "renderer/RenderPipeline.hpp"
 
 // Состояние отдельного персонажа на сцене
@@ -44,6 +45,8 @@ struct CharacterSaveData {
     float sepia = 0.0f;
     float scale = 1.0f;
     bool hasCustomScale = false;
+    std::string customShaderId;
+    std::unordered_map<std::string, ShaderUniformValue> customUniforms;
 };
 
 // Состояние варианта выбора
@@ -52,6 +55,7 @@ struct ChoiceSaveData {
     std::string targetLabel;
     std::string targetScript;
     std::string condition;
+    bool isEnabled = true;
 };
 
 // Запись в истории диалогов
@@ -71,10 +75,14 @@ struct GameSaveState {
     std::string scriptPath;
     size_t commandIndex = 0;
     std::string currentBackground;
+    std::string currentBackgroundShader;
+    std::unordered_map<std::string, ShaderUniformValue> currentBackgroundUniforms;
     std::string currentSpeaker;
     std::string fullDialogueText;
     bool isWaitingForChoice = false;
     std::vector<ChoiceSaveData> choices;
+    bool isNVLMode = false;
+    std::vector<DialogueHistorySaveData> nvlLines;
 
     // Переменные сценария
     std::unordered_map<std::string, ScriptValue> variables;
@@ -149,6 +157,15 @@ public:
     // Пути к файлам слота
     [[nodiscard]] static std::string getSlotSavePath(int slotIndex);
     [[nodiscard]] static std::string getSlotScreenshotPath(int slotIndex);
+
+    // Управление глобальными (персистентными) переменными, существующими вне сохранений
+    static bool loadPersistentData();
+    static bool savePersistentData();
+    static void setPersistentVariable(const std::string& name, const ScriptValue& val);
+    [[nodiscard]] static ScriptValue getPersistentVariable(const std::string& name);
+    [[nodiscard]] static const std::unordered_map<std::string, ScriptValue>& getPersistentVariables();
+    static void clearPersistentVariables();
+    [[nodiscard]] static std::string getPersistentFilePath();
 };
 
 #endif // DARIVN_SAVEMANAGER_HPP

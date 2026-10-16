@@ -18,8 +18,10 @@
  */
 
 #include "Application.hpp"
+#include "vfs/VFS.hpp"
 
 #include "core/Window.hpp"
+
 #include "core/Input.hpp"
 #include "core/Config.hpp"
 #include "core/SaveManager.hpp"
@@ -92,37 +94,7 @@ static std::filesystem::path getExecutableDir() {
 // 4. На уровень выше CWD
 static std::string resolveAsset(const std::string& relativePath) {
     if (relativePath.empty()) return "";
-
-    std::filesystem::path rel(relativePath);
-    if (rel.is_absolute() && std::filesystem::exists(rel)) {
-        return rel.string();
-    }
-
-    // 1. В текущей директории
-    if (std::filesystem::exists(rel)) {
-        return rel.string();
-    }
-
-    // 2. В папке исполняемого файла
-    auto exeDir = getExecutableDir();
-    auto fromExe = exeDir / rel;
-    if (std::filesystem::exists(fromExe)) {
-        return fromExe.string();
-    }
-
-    // 3. На уровень выше папки бинарника (для запуска из cmake-build-debug/)
-    auto fromExeParent = exeDir.parent_path() / rel;
-    if (std::filesystem::exists(fromExeParent)) {
-        return fromExeParent.string();
-    }
-
-    // 4. На уровень выше текущей папки
-    auto fromCwdParent = std::filesystem::path("..") / rel;
-    if (std::filesystem::exists(fromCwdParent)) {
-        return fromCwdParent.string();
-    }
-
-    return (exeDir / rel).string();
+    return DariVN::VFS::resolveFilePath(relativePath);
 }
 
 Application::Application() = default;
@@ -142,14 +114,17 @@ CharacterSprite& Application::getOrCreateCharacter(const std::string& name) {
     return *ptr;
 }
 
-bool Application::init() {
+bool Application::init(int argc, char* argv[]) {
     std::cout << "[Application] Initializing DariVN Engine..." << std::endl;
+
+    // Инициализация Virtual File System (парсинг флагов запуска, в т.ч. --dev, поиск архивов)
+    DariVN::VFS::init(argc, argv);
 
     // Автоматическая подстройка рабочей директории:
     // Если игра запущена двойным кликом в Finder или из другой папки консоли,
     // переключаем рабочую папку на директорию бинарника (где лежит assets/).
     try {
-        if (!std::filesystem::exists("assets/config.vn") && !std::filesystem::exists("config.vn")) {
+        if (!DariVN::VFS::exists("assets/config.vn") && !DariVN::VFS::exists("config.vn")) {
             auto exeDir = getExecutableDir();
             if (std::filesystem::exists(exeDir / "assets/config.vn") || std::filesystem::exists(exeDir / "config.vn")) {
                 std::filesystem::current_path(exeDir);
@@ -163,14 +138,18 @@ bool Application::init() {
 
     // 1. Загрузка конфигурационного файла (config.vn или assets/config.vn)
     std::string configPath = resolveAsset("config.vn");
-    if (!std::filesystem::exists(configPath)) {
+    if (!DariVN::VFS::exists(configPath)) {
         configPath = resolveAsset("assets/config.vn");
     }
     Config::load(configPath);
 
+
     // 2. Загрузка пользовательских настроек (имеют высший приоритет над config.vn)
     Config::setUserSettingsPath("saves/settings.vn");
     Config::loadUserSettings();
+
+    // 2.1 Загрузка персистентных глобальных переменных (между прохождениями)
+    SaveManager::loadPersistentData();
 
     int winWidth = Config::getInt("window.width", 1280);
     int winHeight = Config::getInt("window.height", 720);
@@ -324,7 +303,13 @@ bool Application::init() {
         }
     });
     m_storyEngine->setTextFormatter([this](std::string_view text) {
-        return m_textRenderer->wrapText(text, m_dialogueBox->getMaxTextWidth(), m_dialogueBox->getTextScale());
+        float maxW = (m_storyEngine->getDialogueMode() == DialogueMode::NVL)
+            ? 1030.0f
+            : m_dialogueBox->getMaxTextWidth();
+        float scale = (m_storyEngine->getDialogueMode() == DialogueMode::NVL)
+            ? 0.78f
+            : m_dialogueBox->getTextScale();
+        return m_textRenderer->wrapText(text, maxW, scale);
     });
     m_storyEngine->setAnimationEventHandler([this](const std::string& charId, CharacterAnimationEvent::Type type, float p1, float p2) {
         auto it = m_characters.find(charId);
@@ -516,8 +501,8 @@ bool Application::restoreGameState(const GameSaveState& state) {
     return true;
 }
 
-void Application::run() {
-    if (!init()) {
+void Application::run(int argc, char* argv[]) {
+    if (!init(argc, argv)) {
         throw std::runtime_error("Application initialization failed");
     }
 
@@ -603,6 +588,7 @@ void Application::render() {
 }
 
 void Application::shutdown() {
+    SaveManager::savePersistentData();
     m_characters.clear();
     m_stateManager.reset();
     m_context.reset();

@@ -18,8 +18,10 @@
  */
 
 #include "ScriptParser.hpp"
+#include "vfs/VFS.hpp"
 
 #include <fstream>
+
 #include <sstream>
 #include <iostream>
 #include <cctype>
@@ -335,6 +337,31 @@ static bool parseSingleCommand(std::string_view trimmed,
         }
     }
 
+    // 1.9 Пользовательский шейдер сцены через scene/bg: scene shader <id|clear> / scene shader set <param> <vals...>
+    if ((tokens[0] == "scene" || tokens[0] == "bg") && tokens.size() >= 3 && tokens[1] == "shader") {
+        cmd = ScriptCommand();
+        cmd.condition = condition;
+        if (tokens[2] == "set" && tokens.size() >= 5) {
+            cmd.type = CommandType::ShaderSetUniform;
+            cmd.characterName = "scene";
+            cmd.uniformName = tokens[3];
+            for (size_t i = 4; i < tokens.size(); ++i) {
+                if (isNumber(tokens[i])) {
+                    cmd.uniformValues.push_back(std::stof(tokens[i]));
+                }
+            }
+            return true;
+        } else if (tokens[2] == "clear" || tokens[2] == "off" || tokens[2] == "none" || tokens[2] == "reset") {
+            cmd.type = CommandType::ShaderScene;
+            cmd.shaderId = "";
+            return true;
+        } else {
+            cmd.type = CommandType::ShaderScene;
+            cmd.shaderId = tokens[2];
+            return true;
+        }
+    }
+
     // 2. Смена фона: scene <path> [with <fade|dissolve|crossfade> [duration]]
     if (tokens[0] == "scene" || tokens[0] == "bg") {
         if (tokens.size() >= 2) {
@@ -373,6 +400,18 @@ static bool parseSingleCommand(std::string_view trimmed,
         cmd = ScriptCommand();
         cmd.type = CommandType::LoadCharacter;
         cmd.characterName = tokens[2];
+        if (tokens.size() >= 4) {
+            cmd.path = tokens[3];
+        }
+        cmd.condition = condition;
+        return true;
+    }
+
+    // 2.25 Загрузка конфигурации шейдера из отдельного файла: load shader <id> [path]
+    if ((tokens[0] == "load" || tokens[0] == "import") && tokens.size() >= 3 && tokens[1] == "shader") {
+        cmd = ScriptCommand();
+        cmd.type = CommandType::LoadShader;
+        cmd.shaderId = tokens[2];
         if (tokens.size() >= 4) {
             cmd.path = tokens[3];
         }
@@ -637,6 +676,21 @@ static bool parseSingleCommand(std::string_view trimmed,
             cmd.condition = condition;
             return true;
         } else if (tokens.size() >= 3) {
+            if (tokens[2] == "shader") {
+                cmd = ScriptCommand();
+                cmd.condition = condition;
+                if (tokens.size() >= 4 && (tokens[3] == "clear" || tokens[3] == "off" || tokens[3] == "none" || tokens[3] == "reset")) {
+                    cmd.type = CommandType::ShaderCharacter;
+                    cmd.characterName = tokens[1];
+                    cmd.shaderId = "";
+                    return true;
+                } else if (tokens.size() >= 4) {
+                    cmd.type = CommandType::ShaderCharacter;
+                    cmd.characterName = tokens[1];
+                    cmd.shaderId = tokens[3];
+                    return true;
+                }
+            }
             cmd = ScriptCommand();
             cmd.type = CommandType::CharacterEffect;
             cmd.characterName = tokens[1];
@@ -650,6 +704,85 @@ static bool parseSingleCommand(std::string_view trimmed,
                 if (tokens.size() >= 7 && isNumber(tokens[6])) cmd.effectValue4 = std::stof(tokens[6]);
             }
             cmd.condition = condition;
+            return true;
+        }
+    }
+
+    // 7.5. Пользовательские шейдеры для сцены и персонажей:
+    // shader scene <id> / shader bg <id> / shader scene clear
+    // shader scene set <uniform> <vals...>
+    // shader <charId> <id> / shader <charId> clear
+    // shader <charId> set <uniform> <vals...>
+    if (tokens[0] == "shader" && tokens.size() >= 2) {
+        cmd = ScriptCommand();
+        cmd.condition = condition;
+
+        // shader set <scene|char> <uniform> <vals...>
+        if (tokens[1] == "set" && tokens.size() >= 4) {
+            cmd.type = CommandType::ShaderSetUniform;
+            cmd.characterName = (tokens[2] == "scene" || tokens[2] == "bg") ? "" : tokens[2];
+            cmd.uniformName = tokens[3];
+            for (size_t i = 4; i < tokens.size(); ++i) {
+                if (isNumber(tokens[i])) {
+                    cmd.uniformValues.push_back(std::stof(tokens[i]));
+                }
+            }
+            return true;
+        }
+
+        // shader scene ... / shader bg ...
+        if (tokens[1] == "scene" || tokens[1] == "bg") {
+            if (tokens.size() >= 3 && tokens[2] == "set" && tokens.size() >= 5) {
+                cmd.type = CommandType::ShaderSetUniform;
+                cmd.characterName = "";
+                cmd.uniformName = tokens[3];
+                for (size_t i = 4; i < tokens.size(); ++i) {
+                    if (isNumber(tokens[i])) {
+                        cmd.uniformValues.push_back(std::stof(tokens[i]));
+                    }
+                }
+                return true;
+            } else if (tokens.size() >= 3 && (tokens[2] == "clear" || tokens[2] == "off" || tokens[2] == "none" || tokens[2] == "reset")) {
+                cmd.type = CommandType::ShaderScene;
+                cmd.shaderId = "";
+                return true;
+            } else if (tokens.size() >= 3) {
+                cmd.type = CommandType::ShaderScene;
+                cmd.shaderId = tokens[2];
+                return true;
+            } else {
+                cmd.type = CommandType::ShaderScene;
+                cmd.shaderId = "";
+                return true;
+            }
+        }
+
+        // shader <charId> set <uniform> <vals...>
+        if (tokens.size() >= 4 && tokens[2] == "set") {
+            cmd.type = CommandType::ShaderSetUniform;
+            cmd.characterName = tokens[1];
+            cmd.uniformName = tokens[3];
+            for (size_t i = 4; i < tokens.size(); ++i) {
+                if (isNumber(tokens[i])) {
+                    cmd.uniformValues.push_back(std::stof(tokens[i]));
+                }
+            }
+            return true;
+        }
+
+        // shader <charId> clear/off/none/reset
+        if (tokens.size() >= 3 && (tokens[2] == "clear" || tokens[2] == "off" || tokens[2] == "none" || tokens[2] == "reset")) {
+            cmd.type = CommandType::ShaderCharacter;
+            cmd.characterName = tokens[1];
+            cmd.shaderId = "";
+            return true;
+        }
+
+        // shader <charId> <shaderId>
+        if (tokens.size() >= 3) {
+            cmd.type = CommandType::ShaderCharacter;
+            cmd.characterName = tokens[1];
+            cmd.shaderId = tokens[2];
             return true;
         }
     }
@@ -684,6 +817,65 @@ static bool parseSingleCommand(std::string_view trimmed,
         cmd.effectValue1 = (tokens.size() >= 3 && isNumber(tokens[2])) ? std::stof(tokens[2]) : 0.25f;
         cmd.condition = condition;
         return true;
+    }
+
+    // 10.5. NVL-режим (полноэкранный текст новеллы) и очистка NVL
+    if (tokens[0] == "nvl" && tokens.size() >= 2) {
+        if (tokens[1] == "clear") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::NVLClear;
+            cmd.condition = condition;
+            return true;
+        } else if (tokens[1] == "on" || tokens[1] == "show" || tokens[1] == "start") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::DialogueModeChange;
+            cmd.dialogueMode = DialogueMode::NVL;
+            cmd.condition = condition;
+            return true;
+        } else if (tokens[1] == "off" || tokens[1] == "hide" || tokens[1] == "stop") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::DialogueModeChange;
+            cmd.dialogueMode = DialogueMode::ADV;
+            cmd.condition = condition;
+            return true;
+        }
+    }
+    if (tokens[0] == "nvl" && tokens.size() == 1) {
+        cmd = ScriptCommand();
+        cmd.type = CommandType::DialogueModeChange;
+        cmd.dialogueMode = DialogueMode::NVL;
+        cmd.condition = condition;
+        return true;
+    }
+    if (tokens[0] == "mode" && tokens.size() >= 2) {
+        if (tokens[1] == "nvl") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::DialogueModeChange;
+            cmd.dialogueMode = DialogueMode::NVL;
+            cmd.condition = condition;
+            return true;
+        } else if (tokens[1] == "adv") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::DialogueModeChange;
+            cmd.dialogueMode = DialogueMode::ADV;
+            cmd.condition = condition;
+            return true;
+        }
+    }
+    if (tokens[0] == "window" && tokens.size() >= 2) {
+        if (tokens[1] == "nvl" || tokens[1] == "fullscreen") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::DialogueModeChange;
+            cmd.dialogueMode = DialogueMode::NVL;
+            cmd.condition = condition;
+            return true;
+        } else if (tokens[1] == "adv" || tokens[1] == "normal" || tokens[1] == "bottom") {
+            cmd = ScriptCommand();
+            cmd.type = CommandType::DialogueModeChange;
+            cmd.dialogueMode = DialogueMode::ADV;
+            cmd.condition = condition;
+            return true;
+        }
     }
 
     // 11. Реплика диалога с ключом локализации без кавычек: speaker @key или @key
@@ -727,6 +919,11 @@ static bool parseSingleCommand(std::string_view trimmed,
 }
 
 std::vector<ScriptCommand> ScriptParser::parseFile(const std::string& filePath) {
+    std::string content = DariVN::VFS::readTextFile(filePath);
+    if (!content.empty()) {
+        return parseString(content);
+    }
+
     std::ifstream file(filePath);
     if (!file.is_open()) {
         std::cerr << "[ScriptParser] Failed to open script file: " << filePath << std::endl;
@@ -762,6 +959,7 @@ std::vector<ScriptCommand> ScriptParser::parseString(const std::string& content)
                 auto targetTokens = splitQuotedTokens(targetPart);
 
                 ChoiceOption opt;
+                opt.conditionMode = currentChoiceCmd.defaultChoiceMode;
                 size_t ifPos = findOutsideQuotes(optionPart, " if ");
                 std::string_view rawOptionText = optionPart;
                 if (ifPos != std::string_view::npos) {
@@ -775,8 +973,49 @@ std::vector<ScriptCommand> ScriptParser::parseString(const std::string& content)
                         if (afterQuote.starts_with("if ") || afterQuote.starts_with("if\t")) {
                             rawOptionText = trim(optionPart.substr(0, lastQ + 1));
                             opt.condition = std::string(trim(afterQuote.substr(2)));
+                        } else if (afterQuote == "(disable)" || afterQuote == "[disable]" || afterQuote == "disable" ||
+                                   afterQuote == "(lock)" || afterQuote == "[lock]" || afterQuote == "lock") {
+                            rawOptionText = trim(optionPart.substr(0, lastQ + 1));
+                            opt.conditionMode = ChoiceConditionMode::Disable;
+                            opt.condition = "false"; // Всегда неактивен
                         }
                     }
+                }
+
+                // Парсим модификаторы режима отображения условия (else disable, lock, hide и др.)
+                if (!opt.condition.empty()) {
+                    std::string condStr = std::string(trim(opt.condition));
+                    auto endsWithWord = [](std::string_view str, std::string_view suffix) -> bool {
+                        if (str.size() < suffix.size()) return false;
+                        if (str.compare(str.size() - suffix.size(), suffix.size(), suffix) != 0) return false;
+                        if (str.size() == suffix.size()) return true;
+                        char prev = str[str.size() - suffix.size() - 1];
+                        return std::isspace(static_cast<unsigned char>(prev)) || prev == ')' || prev == ']';
+                    };
+
+                    const std::vector<std::pair<std::string, ChoiceConditionMode>> modifiers = {
+                        {"else disable", ChoiceConditionMode::Disable},
+                        {"else lock", ChoiceConditionMode::Disable},
+                        {"(disable)", ChoiceConditionMode::Disable},
+                        {"[disable]", ChoiceConditionMode::Disable},
+                        {"(lock)", ChoiceConditionMode::Disable},
+                        {"[lock]", ChoiceConditionMode::Disable},
+                        {"disable", ChoiceConditionMode::Disable},
+                        {"lock", ChoiceConditionMode::Disable},
+                        {"else hide", ChoiceConditionMode::Hide},
+                        {"(hide)", ChoiceConditionMode::Hide},
+                        {"[hide]", ChoiceConditionMode::Hide},
+                        {"hide", ChoiceConditionMode::Hide}
+                    };
+
+                    for (const auto& [mod, mode] : modifiers) {
+                        if (endsWithWord(condStr, mod)) {
+                            opt.conditionMode = mode;
+                            condStr = std::string(trim(condStr.substr(0, condStr.size() - mod.size())));
+                            break;
+                        }
+                    }
+                    opt.condition = condStr;
                 }
 
                 opt.text = unquote(rawOptionText);
@@ -801,7 +1040,12 @@ std::vector<ScriptCommand> ScriptParser::parseString(const std::string& content)
         // Начало блока choice:
         if (trimmed == "choice:" || trimmed.starts_with("choice")) {
             inChoiceBlock = true;
+            currentChoiceCmd = ScriptCommand();
             currentChoiceCmd.type = CommandType::Choice;
+            currentChoiceCmd.defaultChoiceMode = ChoiceConditionMode::Hide;
+            if (trimmed.find("disable") != std::string_view::npos || trimmed.find("lock") != std::string_view::npos) {
+                currentChoiceCmd.defaultChoiceMode = ChoiceConditionMode::Disable;
+            }
             continue;
         }
 

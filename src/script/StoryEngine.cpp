@@ -20,8 +20,12 @@
 #include "StoryEngine.hpp"
 #include "ScriptParser.hpp"
 #include "resource/Localization.hpp"
+#include "resource/ResourceManager.hpp"
+#include "renderer/Shader.hpp"
 #include "core/SaveManager.hpp"
+#include "vfs/VFS.hpp"
 #include <iostream>
+
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -39,7 +43,7 @@ bool StoryEngine::loadCharacterConfig(const std::string& charId, const std::stri
         };
         for (const auto& c : candidates) {
             std::string resolved = m_assetResolver ? m_assetResolver(c) : c;
-            if (std::filesystem::exists(resolved)) {
+            if (DariVN::VFS::exists(resolved)) {
                 path = resolved;
                 break;
             }
@@ -48,17 +52,26 @@ bool StoryEngine::loadCharacterConfig(const std::string& charId, const std::stri
         path = m_assetResolver ? m_assetResolver(path) : path;
     }
 
-    if (path.empty() || !std::filesystem::exists(path)) {
-        return false;
+    std::string content = DariVN::VFS::readTextFile(path);
+    if (content.empty()) {
+        if (path.empty() || !DariVN::VFS::exists(path)) {
+            return false;
+        }
+
+        std::ifstream file(path);
+        if (!file.is_open()) {
+            return false;
+        }
+        std::stringstream ss;
+        ss << file.rdbuf();
+        content = ss.str();
     }
 
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        return false;
-    }
+    std::istringstream file(content);
 
     auto& def = m_definedCharacters[charId];
     def.id = charId;
+
     if (def.displayName.empty()) def.displayName = charId;
 
     auto trimStr = [](std::string s) {
@@ -103,12 +116,131 @@ bool StoryEngine::loadCharacterConfig(const std::string& charId, const std::stri
                 def.expressions[exprName] = val;
             } else if (key == "normal" || key == "happy" || key == "sad" || key == "angry" || key == "shock") {
                 def.expressions[key] = val;
+            } else if (key == "shader" || key == "defaultShader" || key == "default_shader") {
+                def.defaultShader = val;
             }
         }
     }
 
     std::cout << "[StoryEngine] Loaded character config '" << charId << "' (" << def.displayName << ") from " << path << std::endl;
     return true;
+}
+
+bool StoryEngine::loadShaderConfig(const std::string& shaderId, const std::string& specificPath) {
+    std::string path = specificPath;
+    if (path.empty()) {
+        std::vector<std::string> candidates = {
+            "assets/shaders/" + shaderId + ".vn",
+            "assets/shaders/" + shaderId + ".ini",
+            "shaders/" + shaderId + ".vn",
+            "shaders/" + shaderId + ".ini"
+        };
+        for (const auto& c : candidates) {
+            std::string resolved = m_assetResolver ? m_assetResolver(c) : c;
+            if (DariVN::VFS::exists(resolved)) {
+                path = resolved;
+                break;
+            }
+        }
+    } else {
+        path = m_assetResolver ? m_assetResolver(path) : path;
+    }
+
+    std::string content = DariVN::VFS::readTextFile(path);
+    if (content.empty()) {
+        if (path.empty() || !DariVN::VFS::exists(path)) {
+            std::cerr << "[StoryEngine] Warning: Shader config file not found for: " << shaderId << std::endl;
+            return false;
+        }
+
+        std::ifstream file(path);
+        if (!file.is_open()) {
+            std::cerr << "[StoryEngine] Failed to open shader config file: " << path << std::endl;
+            return false;
+        }
+        std::stringstream ss;
+        ss << file.rdbuf();
+        content = ss.str();
+    }
+
+    std::istringstream file(content);
+
+
+    auto trimStr = [](std::string s) {
+        size_t s1 = s.find_first_not_of(" \t\r\n");
+        if (s1 == std::string::npos) return std::string();
+        size_t s2 = s.find_last_not_of(" \t\r\n");
+        s = s.substr(s1, s2 - s1 + 1);
+        if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') || (s.front() == '\'' && s.back() == '\''))) {
+            return s.substr(1, s.size() - 2);
+        }
+        return s;
+    };
+
+    auto& def = m_definedShaders[shaderId];
+    def.id = shaderId;
+    def.vertexPath = "assets/shaders/sprite.vert";
+    def.fragmentPath.clear();
+    def.defaultUniforms.clear();
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) continue;
+        size_t end = line.find_last_not_of(" \t\r\n");
+        std::string trimmed = line.substr(start, end - start + 1);
+
+        if (trimmed.empty() || trimmed[0] == '#' || trimmed.starts_with("//")) continue;
+
+        size_t eq = trimmed.find('=');
+        if (eq == std::string::npos) eq = trimmed.find(':');
+        if (eq != std::string::npos) {
+            std::string key = trimStr(trimmed.substr(0, eq));
+            std::string val = trimStr(trimmed.substr(eq + 1));
+
+            if (key == "id") {
+                def.id = val;
+            } else if (key == "vertex" || key == "vert" || key == "vertexShader" || key == "vertex_shader") {
+                def.vertexPath = val;
+            } else if (key == "fragment" || key == "frag" || key == "fragmentShader" || key == "fragment_shader") {
+                def.fragmentPath = val;
+            } else {
+                std::string uName = key;
+                if (uName.starts_with("uniform.")) uName = uName.substr(8);
+                else if (uName.starts_with("param.")) uName = uName.substr(6);
+
+                std::vector<float> nums;
+                std::stringstream ss(val);
+                float f;
+                while (ss >> f) {
+                    nums.push_back(f);
+                }
+                if (!nums.empty()) {
+                    if (nums.size() == 1) def.defaultUniforms[uName] = ShaderUniformValue(nums[0]);
+                    else if (nums.size() == 2) def.defaultUniforms[uName] = ShaderUniformValue(nums[0], nums[1]);
+                    else if (nums.size() == 3) def.defaultUniforms[uName] = ShaderUniformValue(nums[0], nums[1], nums[2]);
+                    else if (nums.size() >= 4) def.defaultUniforms[uName] = ShaderUniformValue(nums[0], nums[1], nums[2], nums[3]);
+                }
+            }
+        }
+    }
+
+    if (!def.fragmentPath.empty()) {
+        std::string vertResolved = m_assetResolver ? m_assetResolver(def.vertexPath) : def.vertexPath;
+        std::string fragResolved = m_assetResolver ? m_assetResolver(def.fragmentPath) : def.fragmentPath;
+        auto sh = ResourceManager::loadShader(shaderId, vertResolved, fragResolved);
+        if (sh && sh->isValid()) {
+            std::cout << "[StoryEngine] Successfully loaded custom shader '" << shaderId 
+                      << "' from " << path << " (" << def.fragmentPath << ")" << std::endl;
+            return true;
+        } else {
+            std::cerr << "[StoryEngine] Failed to compile custom shader '" << shaderId << "' (" << def.fragmentPath << ")" << std::endl;
+            return false;
+        }
+    }
+
+    std::cerr << "[StoryEngine] Warning: No fragment shader specified in " << path << std::endl;
+    return false;
 }
 
 bool StoryEngine::switchScript(const std::string& filePath, const std::string& targetLabel) {
@@ -152,6 +284,10 @@ bool StoryEngine::switchScript(const std::string& filePath, const std::string& t
     m_isWaitingForChoice = false;
     m_currentChoices.clear();
     m_isFinished = false;
+    m_dialogueMode = DialogueMode::ADV;
+    m_nvlLines.clear();
+    m_currentBackgroundShader.clear();
+    m_currentBackgroundUniforms.clear();
 
     if (m_scriptChangeHandler) {
         m_scriptChangeHandler(resolved);
@@ -184,13 +320,26 @@ bool StoryEngine::loadScript(const std::string& filePath) {
     return true;
 }
 
+bool StoryEngine::isPersistentVariable(std::string_view name) {
+    if (name.starts_with('$')) name = name.substr(1);
+    return name.starts_with("persistent.") || name.starts_with("global.") ||
+           name.starts_with("persistent_") || name.starts_with("global_");
+}
+
 void StoryEngine::setVariable(const std::string& name, const ScriptValue& val) {
     std::string key = name.starts_with('$') ? name.substr(1) : name;
+    if (isPersistentVariable(key)) {
+        SaveManager::setPersistentVariable(key, val);
+        return;
+    }
     m_variables[key] = val;
 }
 
 ScriptValue StoryEngine::getVariable(const std::string& name) const {
     std::string key = name.starts_with('$') ? name.substr(1) : name;
+    if (isPersistentVariable(key)) {
+        return SaveManager::getPersistentVariable(key);
+    }
     auto it = m_variables.find(key);
     if (it != m_variables.end()) return it->second;
     return ScriptValue();
@@ -280,6 +429,10 @@ void StoryEngine::reset() {
     m_isWaitingForChoice = false;
     m_currentChoices.clear();
     m_isFinished = false;
+    m_dialogueMode = DialogueMode::ADV;
+    m_nvlLines.clear();
+    m_currentBackgroundShader.clear();
+    m_currentBackgroundUniforms.clear();
     m_postProcessSettings.reset();
     m_variables.clear();
     m_dialogueHistory.clear();
@@ -398,6 +551,7 @@ void StoryEngine::nextStep() {
 
 void StoryEngine::chooseOption(size_t index) {
     if (!m_isWaitingForChoice || index >= m_currentChoices.size()) return;
+    if (!m_currentChoices[index].isEnabled) return;
 
     ChoiceOption opt = m_currentChoices[index];
     m_isWaitingForChoice = false;
@@ -452,34 +606,34 @@ void StoryEngine::executeNextCommand() {
 
                 switch (cmd.varOp) {
                     case VariableOp::Assign:
-                        m_variables[varName] = rhs;
+                        setVariable(varName, rhs);
                         break;
                     case VariableOp::AddAssign: {
-                        auto it = m_variables.find(varName);
-                        ScriptValue cur = (it != m_variables.end()) ? it->second : ScriptValue(0.0);
-                        m_variables[varName] = cur + rhs;
+                        ScriptValue cur = getVariable(varName);
+                        if (cur.isNull()) cur = ScriptValue(0.0);
+                        setVariable(varName, cur + rhs);
                         break;
                     }
                     case VariableOp::SubAssign: {
-                        auto it = m_variables.find(varName);
-                        ScriptValue cur = (it != m_variables.end()) ? it->second : ScriptValue(0.0);
-                        m_variables[varName] = cur - rhs;
+                        ScriptValue cur = getVariable(varName);
+                        if (cur.isNull()) cur = ScriptValue(0.0);
+                        setVariable(varName, cur - rhs);
                         break;
                     }
                     case VariableOp::MulAssign: {
-                        auto it = m_variables.find(varName);
-                        ScriptValue cur = (it != m_variables.end()) ? it->second : ScriptValue(0.0);
-                        m_variables[varName] = cur * rhs;
+                        ScriptValue cur = getVariable(varName);
+                        if (cur.isNull()) cur = ScriptValue(0.0);
+                        setVariable(varName, cur * rhs);
                         break;
                     }
                     case VariableOp::DivAssign: {
-                        auto it = m_variables.find(varName);
-                        ScriptValue cur = (it != m_variables.end()) ? it->second : ScriptValue(0.0);
-                        m_variables[varName] = cur / rhs;
+                        ScriptValue cur = getVariable(varName);
+                        if (cur.isNull()) cur = ScriptValue(0.0);
+                        setVariable(varName, cur / rhs);
                         break;
                     }
                 }
-                std::cout << "[StoryEngine] Variable '" << varName << "' = " << m_variables[varName].asString() << std::endl;
+                std::cout << "[StoryEngine] Variable '" << varName << "' = " << getVariable(varName).asString() << std::endl;
                 m_currentCommandIndex++;
                 break;
             }
@@ -665,6 +819,17 @@ void StoryEngine::executeNextCommand() {
                 glm::vec4 tint = alreadyActive ? itActive->second.tint : glm::vec4(1.0f);
                 float sepia = alreadyActive ? itActive->second.sepia : 0.0f;
 
+                std::string customShader = alreadyActive ? itActive->second.customShaderId : (itDef != m_definedCharacters.end() ? itDef->second.defaultShader : "");
+                std::unordered_map<std::string, ShaderUniformValue> customUniforms;
+                if (alreadyActive) {
+                    customUniforms = itActive->second.customUniforms;
+                } else if (!customShader.empty()) {
+                    auto shIt = m_definedShaders.find(customShader);
+                    if (shIt != m_definedShaders.end()) {
+                        customUniforms = shIt->second.defaultUniforms;
+                    }
+                }
+
                 ActiveCharacter ac;
                 ac.id = cmd.characterName;
                 ac.expression = expr;
@@ -677,6 +842,8 @@ void StoryEngine::executeNextCommand() {
                 ac.isSilhouette = isSilhouette;
                 ac.silhouetteColor = glm::vec4(0.08f, 0.09f, 0.14f, 1.0f);
                 ac.sepia = sepia;
+                ac.customShaderId = customShader;
+                ac.customUniforms = std::move(customUniforms);
 
                 m_activeCharacters[cmd.characterName] = std::move(ac);
                 m_currentCommandIndex++;
@@ -768,9 +935,84 @@ void StoryEngine::executeNextCommand() {
                 break;
             }
 
+            case CommandType::DialogueModeChange: {
+                m_dialogueMode = cmd.dialogueMode;
+                if (m_dialogueMode == DialogueMode::ADV) {
+                    m_nvlLines.clear();
+                }
+                m_currentCommandIndex++;
+                break;
+            }
+
+            case CommandType::NVLClear: {
+                clearNVL();
+                m_currentCommandIndex++;
+                break;
+            }
+
+            case CommandType::LoadShader: {
+                loadShaderConfig(cmd.shaderId, cmd.path);
+                m_currentCommandIndex++;
+                break;
+            }
+
+            case CommandType::ShaderScene: {
+                m_currentBackgroundShader = cmd.shaderId;
+                m_currentBackgroundUniforms.clear();
+                if (!cmd.shaderId.empty()) {
+                    auto it = m_definedShaders.find(cmd.shaderId);
+                    if (it != m_definedShaders.end()) {
+                        m_currentBackgroundUniforms = it->second.defaultUniforms;
+                    }
+                }
+                m_currentCommandIndex++;
+                break;
+            }
+
+            case CommandType::ShaderCharacter: {
+                auto it = m_activeCharacters.find(cmd.characterName);
+                if (it != m_activeCharacters.end()) {
+                    it->second.customShaderId = cmd.shaderId;
+                    it->second.customUniforms.clear();
+                    if (!cmd.shaderId.empty()) {
+                        auto shIt = m_definedShaders.find(cmd.shaderId);
+                        if (shIt != m_definedShaders.end()) {
+                            it->second.customUniforms = shIt->second.defaultUniforms;
+                        }
+                    }
+                }
+                m_currentCommandIndex++;
+                break;
+            }
+
+            case CommandType::ShaderSetUniform: {
+                ShaderUniformValue val;
+                if (!cmd.uniformValues.empty()) {
+                    if (cmd.uniformValues.size() == 1) val = ShaderUniformValue(cmd.uniformValues[0]);
+                    else if (cmd.uniformValues.size() == 2) val = ShaderUniformValue(cmd.uniformValues[0], cmd.uniformValues[1]);
+                    else if (cmd.uniformValues.size() == 3) val = ShaderUniformValue(cmd.uniformValues[0], cmd.uniformValues[1], cmd.uniformValues[2]);
+                    else if (cmd.uniformValues.size() >= 4) val = ShaderUniformValue(cmd.uniformValues[0], cmd.uniformValues[1], cmd.uniformValues[2], cmd.uniformValues[3]);
+                }
+                if (cmd.characterName.empty() || cmd.characterName == "scene" || cmd.characterName == "bg") {
+                    m_currentBackgroundUniforms[cmd.uniformName] = val;
+                } else {
+                    auto it = m_activeCharacters.find(cmd.characterName);
+                    if (it != m_activeCharacters.end()) {
+                        it->second.customUniforms[cmd.uniformName] = val;
+                    }
+                }
+                m_currentCommandIndex++;
+                break;
+            }
+
             case CommandType::Say: {
                 if (m_audioHandler) {
                     m_audioHandler({ AudioEvent::Type::StopVoice, "", false, 0.0f, 1.0f });
+                }
+
+                // В NVL-режиме предыдущая прочитанная фраза переносится в накопленный список
+                if (m_dialogueMode == DialogueMode::NVL && !m_fullDialogueText.empty()) {
+                    m_nvlLines.push_back({m_currentSpeaker, m_fullDialogueText});
                 }
 
                 std::string speaker = cmd.speaker;
@@ -812,10 +1054,15 @@ void StoryEngine::executeNextCommand() {
                 m_isWaitingForChoice = true;
                 m_currentChoices.clear();
                 for (const auto& rawOpt : cmd.choices) {
-                    if (!rawOpt.condition.empty() && !evaluateCondition(rawOpt.condition)) {
+                    bool conditionPassed = true;
+                    if (!rawOpt.condition.empty()) {
+                        conditionPassed = evaluateCondition(rawOpt.condition);
+                    }
+                    if (!conditionPassed && rawOpt.conditionMode == ChoiceConditionMode::Hide) {
                         continue; // Условие не выполнено — вариант скрывается
                     }
                     ChoiceOption opt = rawOpt;
+                    opt.isEnabled = conditionPassed;
                     opt.text = Localization::resolve(opt.text);
                     opt.text = interpolateVariables(opt.text);
                     m_currentChoices.push_back(std::move(opt));
@@ -842,9 +1089,16 @@ void StoryEngine::captureSaveState(GameSaveState& outState) const {
     outState.scriptPath = m_currentScriptPath;
     outState.commandIndex = m_currentCommandIndex;
     outState.currentBackground = m_currentBackground;
+    outState.currentBackgroundShader = m_currentBackgroundShader;
+    outState.currentBackgroundUniforms = m_currentBackgroundUniforms;
     outState.currentSpeaker = m_currentSpeaker;
     outState.fullDialogueText = m_fullDialogueText;
     outState.isWaitingForChoice = m_isWaitingForChoice;
+    outState.isNVLMode = (m_dialogueMode == DialogueMode::NVL);
+    outState.nvlLines.clear();
+    for (const auto& l : m_nvlLines) {
+        outState.nvlLines.push_back({l.speaker, l.text});
+    }
 
     outState.choices.clear();
     for (const auto& opt : m_currentChoices) {
@@ -852,7 +1106,8 @@ void StoryEngine::captureSaveState(GameSaveState& outState) const {
             opt.text,
             opt.targetLabel,
             opt.targetScript,
-            opt.condition
+            opt.condition,
+            opt.isEnabled
         });
     }
 
@@ -873,6 +1128,8 @@ void StoryEngine::captureSaveState(GameSaveState& outState) const {
         cd.sepia = ch.sepia;
         cd.scale = ch.scale;
         cd.hasCustomScale = ch.hasCustomScale;
+        cd.customShaderId = ch.customShaderId;
+        cd.customUniforms = ch.customUniforms;
         outState.activeCharacters[name] = std::move(cd);
     }
 
@@ -907,7 +1164,7 @@ bool StoryEngine::restoreSaveState(const GameSaveState& state) {
         }
     }
 
-    // 2. Сканируем файл сценария для восстановления определений персонажей (define character, define expression, load character)
+    // 2. Сканируем файл сценария для восстановления определений персонажей (define character, define expression, load character, load shader)
     m_definedCharacters.clear();
     for (const auto& cmd : m_commands) {
         if (cmd.type == CommandType::DefineCharacter) {
@@ -925,6 +1182,8 @@ bool StoryEngine::restoreSaveState(const GameSaveState& state) {
             def.expressions[cmd.expression] = cmd.path;
         } else if (cmd.type == CommandType::LoadCharacter) {
             loadCharacterConfig(cmd.characterName, cmd.path);
+        } else if (cmd.type == CommandType::LoadShader) {
+            loadShaderConfig(cmd.shaderId, cmd.path);
         }
     }
 
@@ -938,6 +1197,11 @@ bool StoryEngine::restoreSaveState(const GameSaveState& state) {
     // 3. Восстанавливаем позицию и данные сценария
     m_currentCommandIndex = state.commandIndex;
     m_currentBackground = state.currentBackground;
+    m_currentBackgroundShader = state.currentBackgroundShader;
+    m_currentBackgroundUniforms = state.currentBackgroundUniforms;
+    if (!m_currentBackgroundShader.empty() && m_definedShaders.find(m_currentBackgroundShader) == m_definedShaders.end()) {
+        loadShaderConfig(m_currentBackgroundShader);
+    }
     m_currentSpeaker = state.currentSpeaker;
     m_fullDialogueText = state.fullDialogueText;
     m_visibleDialogueText = state.fullDialogueText;
@@ -946,6 +1210,11 @@ bool StoryEngine::restoreSaveState(const GameSaveState& state) {
     m_pauseTimer = 0.0f;
     m_isWaitingForChoice = state.isWaitingForChoice;
     m_isFinished = false;
+    m_dialogueMode = state.isNVLMode ? DialogueMode::NVL : DialogueMode::ADV;
+    m_nvlLines.clear();
+    for (const auto& l : state.nvlLines) {
+        m_nvlLines.push_back({l.speaker, l.text});
+    }
 
     // 3. Восстанавливаем варианты развилки
     m_currentChoices.clear();
@@ -955,6 +1224,7 @@ bool StoryEngine::restoreSaveState(const GameSaveState& state) {
         opt.targetLabel = ch.targetLabel;
         opt.targetScript = ch.targetScript;
         opt.condition = ch.condition;
+        opt.isEnabled = ch.isEnabled;
         m_currentChoices.push_back(std::move(opt));
     }
 

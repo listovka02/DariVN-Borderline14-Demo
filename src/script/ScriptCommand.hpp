@@ -57,7 +57,36 @@ enum class CommandType {
     PlayVoice,        // Озвучка диалога (play voice <path> [volume <v>])
     PlayAmbient,      // Фоновый эмбиент (play ambient <path> [loop] [fade <s>] [volume <v>])
     StopAmbient,      // Остановка эмбиента (stop ambient [fade <s>])
-    SetVariable       // Присваивание/модификация переменной ($var = expr, $var += expr)
+    SetVariable,      // Присваивание/модификация переменной ($var = expr, $var += expr)
+    DialogueModeChange, // nvl on, nvl off, mode nvl, mode adv, window fullscreen, window adv
+    NVLClear,         // nvl clear
+    LoadShader,       // load shader <id> [path]
+    ShaderScene,      // shader scene <id> / shader bg <id> (или clear)
+    ShaderCharacter,  // shader <character_id> <id> (или clear)
+    ShaderSetUniform  // shader set scene <uniform> <values...> / shader <char> set <uniform> <values...>
+};
+
+struct ShaderUniformValue {
+    int count = 1; // 1 = float, 2 = vec2, 3 = vec3, 4 = vec4, 0 = int
+    float f[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    int iVal = 0;
+
+    ShaderUniformValue() = default;
+    ShaderUniformValue(float val) : count(1) { f[0] = val; }
+    ShaderUniformValue(float v1, float v2) : count(2) { f[0] = v1; f[1] = v2; }
+    ShaderUniformValue(float v1, float v2, float v3) : count(3) { f[0] = v1; f[1] = v2; f[2] = v3; }
+    ShaderUniformValue(float v1, float v2, float v3, float v4) : count(4) { f[0] = v1; f[1] = v2; f[2] = v3; f[3] = v4; }
+    ShaderUniformValue(int val) : count(0), iVal(val) {}
+};
+
+enum class DialogueMode {
+    ADV, // Стандартное диалоговое окно внизу экрана
+    NVL  // Полноэкранный текстовый режим (новелла / воспоминания / мысли)
+};
+
+enum class ChoiceConditionMode {
+    Hide,    // Скрывать вариант при невыполнении условия (по умолчанию)
+    Disable  // Отображать вариант серым/неактивным без возможности нажатия
 };
 
 struct ChoiceOption {
@@ -65,10 +94,14 @@ struct ChoiceOption {
     std::string targetLabel;
     std::string targetScript; // опционально: если развилка ведет в другой файл сценария
     std::string condition;    // опционально: условие доступности варианта
+    ChoiceConditionMode conditionMode = ChoiceConditionMode::Hide;
+    bool isEnabled = true;    // Доступен ли вариант для нажатия (вычисляется в runtime)
 };
 
 struct ScriptCommand {
     CommandType type = CommandType::Say;
+    ChoiceConditionMode defaultChoiceMode = ChoiceConditionMode::Hide;
+    DialogueMode dialogueMode = DialogueMode::ADV;
     std::string characterName;
     std::string speaker;
     std::string displayName;
@@ -115,6 +148,11 @@ struct ScriptCommand {
     std::string varExpression;    // Правая часть выражения присваивания
     std::string elseLabel;        // Опциональная метка перехода при невыполнении условия
     std::string elseScript;       // Опциональный скрипт перехода при невыполнении условия
+
+    // Пользовательские шейдеры
+    std::string shaderId;
+    std::string uniformName;
+    std::vector<float> uniformValues;
 
     std::vector<ChoiceOption> choices;
 };

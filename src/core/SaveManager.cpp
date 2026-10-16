@@ -297,11 +297,32 @@ std::string serializeSaveStateToJson(const GameSaveState& state) {
     ss << "  \"previewSpeaker\": " << escapeJsonString(state.previewSpeaker) << ",\n";
     ss << "  \"previewText\": " << escapeJsonString(state.previewText) << ",\n";
 
+    auto serializeUniforms = [](const std::unordered_map<std::string, ShaderUniformValue>& uniforms) -> std::string {
+        std::stringstream ss;
+        ss << "{";
+        size_t uIdx = 0;
+        for (const auto& [uName, uVal] : uniforms) {
+            ss << escapeJsonString(uName) << ": [";
+            if (uVal.count == 0) {
+                ss << uVal.iVal;
+            } else {
+                for (int i = 0; i < uVal.count; ++i) {
+                    ss << uVal.f[i] << (i + 1 < uVal.count ? ", " : "");
+                }
+            }
+            ss << "]" << (++uIdx < uniforms.size() ? ", " : "");
+        }
+        ss << "}";
+        return ss.str();
+    };
+
     // Скрипт
     ss << "  \"script\": {\n";
     ss << "    \"path\": " << escapeJsonString(state.scriptPath) << ",\n";
     ss << "    \"commandIndex\": " << state.commandIndex << ",\n";
     ss << "    \"background\": " << escapeJsonString(state.currentBackground) << ",\n";
+    ss << "    \"backgroundShader\": " << escapeJsonString(state.currentBackgroundShader) << ",\n";
+    ss << "    \"backgroundUniforms\": " << serializeUniforms(state.currentBackgroundUniforms) << ",\n";
     ss << "    \"speaker\": " << escapeJsonString(state.currentSpeaker) << ",\n";
     ss << "    \"fullDialogue\": " << escapeJsonString(state.fullDialogueText) << ",\n";
     ss << "    \"isWaitingForChoice\": " << (state.isWaitingForChoice ? "true" : "false") << ",\n";
@@ -311,8 +332,17 @@ std::string serializeSaveStateToJson(const GameSaveState& state) {
         ss << "      {\"text\": " << escapeJsonString(ch.text)
            << ", \"targetLabel\": " << escapeJsonString(ch.targetLabel)
            << ", \"targetScript\": " << escapeJsonString(ch.targetScript)
-           << ", \"condition\": " << escapeJsonString(ch.condition) << "}"
+           << ", \"condition\": " << escapeJsonString(ch.condition)
+           << ", \"isEnabled\": " << (ch.isEnabled ? "true" : "false") << "}"
            << (c + 1 < state.choices.size() ? ",\n" : "\n");
+    }
+    ss << "    ],\n";
+    ss << "    \"isNVLMode\": " << (state.isNVLMode ? "true" : "false") << ",\n";
+    ss << "    \"nvlLines\": [\n";
+    for (size_t i = 0; i < state.nvlLines.size(); ++i) {
+        ss << "      {\"speaker\": " << escapeJsonString(state.nvlLines[i].speaker)
+           << ", \"text\": " << escapeJsonString(state.nvlLines[i].text) << "}"
+           << (i + 1 < state.nvlLines.size() ? ",\n" : "\n");
     }
     ss << "    ]\n";
     ss << "  },\n";
@@ -346,7 +376,9 @@ std::string serializeSaveStateToJson(const GameSaveState& state) {
         ss << "      \"silhouetteColor\": [" << ch.silhouetteColor.r << ", " << ch.silhouetteColor.g << ", " << ch.silhouetteColor.b << ", " << ch.silhouetteColor.a << "],\n";
         ss << "      \"sepia\": " << ch.sepia << ",\n";
         ss << "      \"scale\": " << ch.scale << ",\n";
-        ss << "      \"hasCustomScale\": " << (ch.hasCustomScale ? "true" : "false") << "\n";
+        ss << "      \"hasCustomScale\": " << (ch.hasCustomScale ? "true" : "false") << ",\n";
+        ss << "      \"customShader\": " << escapeJsonString(ch.customShaderId) << ",\n";
+        ss << "      \"customUniforms\": " << serializeUniforms(ch.customUniforms) << "\n";
         ss << "    }" << (++charIdx < state.activeCharacters.size() ? ",\n" : "\n");
     }
     ss << "  },\n";
@@ -392,10 +424,30 @@ bool deserializeJsonToSaveState(const JsonValue& root, GameSaveState& out) {
     if (auto* ps = root.get("previewSpeaker")) out.previewSpeaker = ps->asString();
     if (auto* pt = root.get("previewText")) out.previewText = pt->asString();
 
+    auto deserializeUniforms = [](const JsonValue* obj) -> std::unordered_map<std::string, ShaderUniformValue> {
+        std::unordered_map<std::string, ShaderUniformValue> res;
+        if (!obj || !obj->isObject()) return res;
+        for (const auto& [uName, uVal] : obj->objVal) {
+            if (uVal.isArray()) {
+                ShaderUniformValue val;
+                val.count = static_cast<int>(uVal.arrVal.size());
+                for (size_t i = 0; i < uVal.arrVal.size() && i < 4; ++i) {
+                    val.f[i] = uVal.arrVal[i].asFloat();
+                }
+                res[uName] = val;
+            } else if (uVal.isNumber()) {
+                res[uName] = ShaderUniformValue(uVal.asFloat());
+            }
+        }
+        return res;
+    };
+
     if (auto* sc = root.get("script")) {
         if (auto* p = sc->get("path")) out.scriptPath = p->asString();
         if (auto* ci = sc->get("commandIndex")) out.commandIndex = ci->asSizeT();
         if (auto* bg = sc->get("background")) out.currentBackground = bg->asString();
+        if (auto* bgs = sc->get("backgroundShader")) out.currentBackgroundShader = bgs->asString();
+        if (auto* bgu = sc->get("backgroundUniforms")) out.currentBackgroundUniforms = deserializeUniforms(bgu);
         if (auto* sp = sc->get("speaker")) out.currentSpeaker = sp->asString();
         if (auto* fd = sc->get("fullDialogue")) out.fullDialogueText = fd->asString();
         if (auto* w = sc->get("isWaitingForChoice")) out.isWaitingForChoice = w->asBool();
@@ -408,7 +460,20 @@ bool deserializeJsonToSaveState(const JsonValue& root, GameSaveState& out) {
                     if (auto* tl = cVal.get("targetLabel")) cd.targetLabel = tl->asString();
                     if (auto* ts = cVal.get("targetScript")) cd.targetScript = ts->asString();
                     if (auto* cond = cVal.get("condition")) cd.condition = cond->asString();
+                    if (auto* en = cVal.get("isEnabled")) cd.isEnabled = en->asBool(true);
                     out.choices.push_back(std::move(cd));
+                }
+            }
+        }
+        if (auto* nvl = sc->get("isNVLMode")) out.isNVLMode = nvl->asBool();
+        if (auto* nls = sc->get("nvlLines")) {
+            if (nls->isArray()) {
+                out.nvlLines.clear();
+                for (const auto& item : nls->arrVal) {
+                    DialogueHistorySaveData d;
+                    if (auto* sp = item.get("speaker")) d.speaker = sp->asString();
+                    if (auto* tx = item.get("text")) d.text = tx->asString();
+                    out.nvlLines.push_back(std::move(d));
                 }
             }
         }
@@ -465,6 +530,8 @@ bool deserializeJsonToSaveState(const JsonValue& root, GameSaveState& out) {
                                                        sc->arrVal[3].asFloat(1.0f));
                     }
                 }
+                if (auto* csh = cObj.get("customShader")) cd.customShaderId = csh->asString();
+                if (auto* csu = cObj.get("customUniforms")) cd.customUniforms = deserializeUniforms(csu);
                 out.activeCharacters[charName] = std::move(cd);
             }
         }
@@ -717,4 +784,124 @@ std::vector<SaveSlotMetadata> SaveManager::getSlotsMetadata(int maxSlots) {
 
 SaveSlotMetadata SaveManager::getQuickSaveMetadata() {
     return getSlotMetadata(QUICKSAVE_SLOT_INDEX);
+}
+
+static std::unordered_map<std::string, ScriptValue> s_persistentVariables;
+static bool s_persistentLoaded = false;
+
+std::string SaveManager::getPersistentFilePath() {
+    return getSaveDirectory() + "/persistent.json";
+}
+
+bool SaveManager::loadPersistentData() {
+    std::string path = getPersistentFilePath();
+    if (!std::filesystem::exists(path)) {
+        s_persistentVariables.clear();
+        s_persistentLoaded = true;
+        return true;
+    }
+
+    std::ifstream file(path);
+    if (!file.is_open()) return false;
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+    file.close();
+
+    size_t i = 0;
+    JsonValue root;
+    if (!parseJsonValue(content, i, root) || !root.isObject()) {
+        std::cerr << "[SaveManager] Failed to parse persistent.json" << std::endl;
+        return false;
+    }
+
+    s_persistentVariables.clear();
+    if (auto* vars = root.get("variables")) {
+        if (vars->isObject()) {
+            for (const auto& [varName, valObj] : vars->objVal) {
+                std::string typeStr;
+                if (auto* t = valObj.get("type")) typeStr = t->asString();
+                auto* v = valObj.get("val");
+                if (!v || typeStr == "null" || v->isNull()) {
+                    s_persistentVariables[varName] = ScriptValue();
+                } else if (typeStr == "bool" || v->isBool()) {
+                    s_persistentVariables[varName] = ScriptValue(v->asBool());
+                } else if (typeStr == "number" || v->isNumber()) {
+                    s_persistentVariables[varName] = ScriptValue(v->asDouble());
+                } else {
+                    s_persistentVariables[varName] = ScriptValue(v->asString());
+                }
+            }
+        }
+    }
+
+    s_persistentLoaded = true;
+    std::cout << "[SaveManager] Loaded " << s_persistentVariables.size() << " persistent variables from " << path << std::endl;
+    return true;
+}
+
+bool SaveManager::savePersistentData() {
+    try {
+        std::filesystem::create_directories(getSaveDirectory());
+    } catch (...) {}
+    std::string path = getPersistentFilePath();
+    std::ofstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "[SaveManager] Failed to open " << path << " for writing" << std::endl;
+        return false;
+    }
+
+    std::ostringstream ss;
+    ss << "{\n";
+    ss << "  \"version\": 1,\n";
+    ss << "  \"variables\": {\n";
+    size_t varIdx = 0;
+    for (const auto& [varName, varVal] : s_persistentVariables) {
+        ss << "    " << escapeJsonString(varName) << ": {";
+        ss << "\"type\": ";
+        if (varVal.isNull()) ss << "\"null\", \"val\": null";
+        else if (varVal.isBool()) ss << "\"bool\", \"val\": " << (varVal.asBool() ? "true" : "false");
+        else if (varVal.isNumber()) ss << "\"number\", \"val\": " << varVal.asNumber();
+        else ss << "\"string\", \"val\": " << escapeJsonString(varVal.asString());
+        ss << "}" << (++varIdx < s_persistentVariables.size() ? ",\n" : "\n");
+    }
+    ss << "  }\n";
+    ss << "}\n";
+
+    file << ss.str();
+    return true;
+}
+
+void SaveManager::setPersistentVariable(const std::string& name, const ScriptValue& val) {
+    if (!s_persistentLoaded) {
+        loadPersistentData();
+    }
+    std::string key = name.starts_with('$') ? name.substr(1) : name;
+    s_persistentVariables[key] = val;
+    savePersistentData();
+}
+
+ScriptValue SaveManager::getPersistentVariable(const std::string& name) {
+    if (!s_persistentLoaded) {
+        loadPersistentData();
+    }
+    std::string key = name.starts_with('$') ? name.substr(1) : name;
+    auto it = s_persistentVariables.find(key);
+    if (it != s_persistentVariables.end()) {
+        return it->second;
+    }
+    return ScriptValue();
+}
+
+const std::unordered_map<std::string, ScriptValue>& SaveManager::getPersistentVariables() {
+    if (!s_persistentLoaded) {
+        loadPersistentData();
+    }
+    return s_persistentVariables;
+}
+
+void SaveManager::clearPersistentVariables() {
+    s_persistentVariables.clear();
+    savePersistentData();
 }
