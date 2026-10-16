@@ -1,3 +1,42 @@
+name: CMake on multiple platforms
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build_type: [Release]
+        c_compiler: [gcc, clang, cl]
+        include:
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+            vcpkg_toolchain: "C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          - os: ubuntu-latest
+            c_compiler: gcc
+            cpp_compiler: g++
+            vcpkg_toolchain: "/usr/local/share/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          - os: ubuntu-latest
+            c_compiler: clang
+            cpp_compiler: clang++
+            vcpkg_toolchain: "/usr/local/share/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        exclude:
+          - os: windows-latest
+            c_compiler: gcc
+          - os: windows-latest
+            c_compiler: clang
+          - os: ubuntu-latest
+            c_compiler: cl
+
     steps:
     - uses: actions/checkout@v4
 
